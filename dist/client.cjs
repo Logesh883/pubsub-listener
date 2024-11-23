@@ -273,7 +273,7 @@ function parseEvent(schema, event, topicName) {
     event: {
       EventUuid: event.event.id,
       EventApiName: topicName.split("/")[2],
-      lastReplyId: replayId,
+      replayId,
       channel: topicName
     }
   };

@@ -1,4 +1,4 @@
-import avro from 'avro-js';
+import avro from "avro-js";
 
 /**
  * Parses the Avro encoded data of an event agains a schema
@@ -7,52 +7,52 @@ import avro from 'avro-js';
  * @returns {*} parsed event data
  * @protected
  */
-export function parseEvent(schema, event,topicName) {
-    const allFields = schema.type.getFields();
-    const replayId = decodeReplayId(event.replayId);
-    const payload = schema.type.fromBuffer(event.event.payload);
-    
-    // Parse CDC header if available
-    if (payload.ChangeEventHeader) {
-        try {
-            payload.ChangeEventHeader.nulledFields = parseFieldBitmaps(
-                allFields,
-                payload.ChangeEventHeader.nulledFields
-            );
-        } catch (error) {
-            throw new Error('Failed to parse nulledFields', { cause: error });
-        }
-        try {
-            payload.ChangeEventHeader.diffFields = parseFieldBitmaps(
-                allFields,
-                payload.ChangeEventHeader.diffFields
-            );
-        } catch (error) {
-            throw new Error('Failed to parse diffFields', { cause: error });
-        }
-        try {
-            payload.ChangeEventHeader.changedFields = parseFieldBitmaps(
-                allFields,
-                payload.ChangeEventHeader.changedFields
-            );
-        } catch (error) {
-            throw new Error('Failed to parse changedFields', { cause: error });
-        }
+export function parseEvent(schema, event, topicName) {
+  const allFields = schema.type.getFields();
+  const replayId = decodeReplayId(event.replayId);
+  const payload = schema.type.fromBuffer(event.event.payload);
+
+  // Parse CDC header if available
+  if (payload.ChangeEventHeader) {
+    try {
+      payload.ChangeEventHeader.nulledFields = parseFieldBitmaps(
+        allFields,
+        payload.ChangeEventHeader.nulledFields
+      );
+    } catch (error) {
+      throw new Error("Failed to parse nulledFields", { cause: error });
     }
-    
-    // Eliminate intermediate types left by Avro in payload
-    flattenSinglePropertyObjects(payload);
-    // Return parsed data
-    return {
-        replayId,
-        payload,
-        event:{
-            EventUuid: event.event.id,
-            EventApiName: topicName.split('/')[2],
-            lastReplyId: replayId,
-            channel:topicName
-        }
-    };
+    try {
+      payload.ChangeEventHeader.diffFields = parseFieldBitmaps(
+        allFields,
+        payload.ChangeEventHeader.diffFields
+      );
+    } catch (error) {
+      throw new Error("Failed to parse diffFields", { cause: error });
+    }
+    try {
+      payload.ChangeEventHeader.changedFields = parseFieldBitmaps(
+        allFields,
+        payload.ChangeEventHeader.changedFields
+      );
+    } catch (error) {
+      throw new Error("Failed to parse changedFields", { cause: error });
+    }
+  }
+
+  // Eliminate intermediate types left by Avro in payload
+  flattenSinglePropertyObjects(payload);
+  // Return parsed data
+  return {
+    replayId,
+    payload,
+    event: {
+      EventUuid: event.event.id,
+      EventApiName: topicName.split("/")[2],
+      replayId: replayId,
+      channel: topicName,
+    },
+  };
 }
 
 /**
@@ -63,18 +63,18 @@ export function parseEvent(schema, event,topicName) {
  * @private
  */
 function flattenSinglePropertyObjects(theObject) {
-    Object.entries(theObject).forEach(([key, value]) => {
-        if (key !== 'ChangeEventHeader' && value && typeof value === 'object') {
-            const subKeys = Object.keys(value);
-            if (subKeys.length === 1) {
-                const subValue = value[subKeys[0]];
-                theObject[key] = subValue;
-                if (subValue && typeof subValue === 'object') {
-                    flattenSinglePropertyObjects(theObject[key]);
-                }
-            }
+  Object.entries(theObject).forEach(([key, value]) => {
+    if (key !== "ChangeEventHeader" && value && typeof value === "object") {
+      const subKeys = Object.keys(value);
+      if (subKeys.length === 1) {
+        const subValue = value[subKeys[0]];
+        theObject[key] = subValue;
+        if (subValue && typeof subValue === "object") {
+          flattenSinglePropertyObjects(theObject[key]);
         }
-    });
+      }
+    }
+  });
 }
 
 /**
@@ -85,40 +85,39 @@ function flattenSinglePropertyObjects(theObject) {
  * @private
  */
 function parseFieldBitmaps(allFields, fieldBitmapsAsHex) {
-    if (fieldBitmapsAsHex.length === 0) {
-        return [];
-    }
+  if (fieldBitmapsAsHex.length === 0) {
+    return [];
+  }
 
-    let fieldNames = [];
-    // Replace top field level bitmap with list of fields
-    if (fieldBitmapsAsHex[0].startsWith('0x')) {
-        fieldNames = getFieldNamesFromBitmap(allFields, fieldBitmapsAsHex[0]);
-    }
-    // Process compound fields
-    if (
-        fieldBitmapsAsHex.length > 1 &&
-        fieldBitmapsAsHex[fieldBitmapsAsHex.length - 1].indexOf('-') !== -1
-    ) {
-        fieldBitmapsAsHex.forEach((fieldBitmapAsHex) => {
-            const bitmapMapStrings = fieldBitmapAsHex.split('-');
-            // Ignore top level field bitmap
-            if (bitmapMapStrings.length >= 2) {
-                const parentField =
-                    allFields[parseInt(bitmapMapStrings[0], 10)];
-                const childFields = getChildFields(parentField);
-                const childFieldNames = getFieldNamesFromBitmap(
-                    childFields,
-                    bitmapMapStrings[1]
-                );
-                fieldNames = fieldNames.concat(
-                    childFieldNames.map(
-                        (fieldName) => `${parentField._name}.${fieldName}`
-                    )
-                );
-            }
-        });
-    }
-    return fieldNames;
+  let fieldNames = [];
+  // Replace top field level bitmap with list of fields
+  if (fieldBitmapsAsHex[0].startsWith("0x")) {
+    fieldNames = getFieldNamesFromBitmap(allFields, fieldBitmapsAsHex[0]);
+  }
+  // Process compound fields
+  if (
+    fieldBitmapsAsHex.length > 1 &&
+    fieldBitmapsAsHex[fieldBitmapsAsHex.length - 1].indexOf("-") !== -1
+  ) {
+    fieldBitmapsAsHex.forEach((fieldBitmapAsHex) => {
+      const bitmapMapStrings = fieldBitmapAsHex.split("-");
+      // Ignore top level field bitmap
+      if (bitmapMapStrings.length >= 2) {
+        const parentField = allFields[parseInt(bitmapMapStrings[0], 10)];
+        const childFields = getChildFields(parentField);
+        const childFieldNames = getFieldNamesFromBitmap(
+          childFields,
+          bitmapMapStrings[1]
+        );
+        fieldNames = fieldNames.concat(
+          childFieldNames.map(
+            (fieldName) => `${parentField._name}.${fieldName}`
+          )
+        );
+      }
+    });
+  }
+  return fieldNames;
 }
 
 /**
@@ -128,14 +127,14 @@ function parseFieldBitmaps(allFields, fieldBitmapsAsHex) {
  * @private
  */
 function getChildFields(parentField) {
-    const types = parentField._type.getTypes();
-    let fields = [];
-    types.forEach((type) => {
-        if (type instanceof avro.types.RecordType) {
-            fields = fields.concat(type.getFields());
-        }
-    });
-    return fields;
+  const types = parentField._type.getTypes();
+  let fields = [];
+  types.forEach((type) => {
+    if (type instanceof avro.types.RecordType) {
+      fields = fields.concat(type.getFields());
+    }
+  });
+  return fields;
 }
 
 /**
@@ -146,17 +145,17 @@ function getChildFields(parentField) {
  * @private
  */
 function getFieldNamesFromBitmap(fields, fieldBitmapAsHex) {
-    // Convert hex to binary and reverse bits
-    let binValue = hexToBin(fieldBitmapAsHex);
-    binValue = binValue.split('').reverse().join('');
-    // Use bitmap to figure out field names based on index
-    const fieldNames = [];
-    for (let i = 0; i < binValue.length && i < fields.length; i++) {
-        if (binValue[i] === '1') {
-            fieldNames.push(fields[i].getName());
-        }
+  // Convert hex to binary and reverse bits
+  let binValue = hexToBin(fieldBitmapAsHex);
+  binValue = binValue.split("").reverse().join("");
+  // Use bitmap to figure out field names based on index
+  const fieldNames = [];
+  for (let i = 0; i < binValue.length && i < fields.length; i++) {
+    if (binValue[i] === "1") {
+      fieldNames.push(fields[i].getName());
     }
-    return fieldNames;
+  }
+  return fieldNames;
 }
 
 /**
@@ -166,7 +165,7 @@ function getFieldNamesFromBitmap(fields, fieldBitmapAsHex) {
  * @protected
  */
 export function decodeReplayId(encodedReplayId) {
-    return Number(encodedReplayId.readBigUInt64BE());
+  return Number(encodedReplayId.readBigUInt64BE());
 }
 
 /**
@@ -176,9 +175,9 @@ export function decodeReplayId(encodedReplayId) {
  * @protected
  */
 export function encodeReplayId(replayId) {
-    const buf = Buffer.allocUnsafe(8);
-    buf.writeBigUInt64BE(BigInt(replayId), 0);
-    return buf;
+  const buf = Buffer.allocUnsafe(8);
+  buf.writeBigUInt64BE(BigInt(replayId), 0);
+  return buf;
 }
 
 /**
@@ -188,10 +187,10 @@ export function encodeReplayId(replayId) {
  * @protected
  */
 export function toJsonString(event) {
-    return JSON.stringify(event, (key, value) =>
-        /* Convert BigInt values into strings and keep other types unchanged */
-        typeof value === 'bigint' ? value.toString() : value
-    );
+  return JSON.stringify(event, (key, value) =>
+    /* Convert BigInt values into strings and keep other types unchanged */
+    typeof value === "bigint" ? value.toString() : value
+  );
 }
 
 /**
@@ -201,22 +200,22 @@ export function toJsonString(event) {
  * @private
  */
 function hexToBin(hex) {
-    let bin = hex.substring(2); // Remove 0x prefix
-    bin = bin.replaceAll('0', '0000');
-    bin = bin.replaceAll('1', '0001');
-    bin = bin.replaceAll('2', '0010');
-    bin = bin.replaceAll('3', '0011');
-    bin = bin.replaceAll('4', '0100');
-    bin = bin.replaceAll('5', '0101');
-    bin = bin.replaceAll('6', '0110');
-    bin = bin.replaceAll('7', '0111');
-    bin = bin.replaceAll('8', '1000');
-    bin = bin.replaceAll('9', '1001');
-    bin = bin.replaceAll('A', '1010');
-    bin = bin.replaceAll('B', '1011');
-    bin = bin.replaceAll('C', '1100');
-    bin = bin.replaceAll('D', '1101');
-    bin = bin.replaceAll('E', '1110');
-    bin = bin.replaceAll('F', '1111');
-    return bin;
+  let bin = hex.substring(2); // Remove 0x prefix
+  bin = bin.replaceAll("0", "0000");
+  bin = bin.replaceAll("1", "0001");
+  bin = bin.replaceAll("2", "0010");
+  bin = bin.replaceAll("3", "0011");
+  bin = bin.replaceAll("4", "0100");
+  bin = bin.replaceAll("5", "0101");
+  bin = bin.replaceAll("6", "0110");
+  bin = bin.replaceAll("7", "0111");
+  bin = bin.replaceAll("8", "1000");
+  bin = bin.replaceAll("9", "1001");
+  bin = bin.replaceAll("A", "1010");
+  bin = bin.replaceAll("B", "1011");
+  bin = bin.replaceAll("C", "1100");
+  bin = bin.replaceAll("D", "1101");
+  bin = bin.replaceAll("E", "1110");
+  bin = bin.replaceAll("F", "1111");
+  return bin;
 }
