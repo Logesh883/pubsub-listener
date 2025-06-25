@@ -556,6 +556,11 @@ var PubSubApiClient = class {
    */
   #subscriptions;
   /**
+   * Map of processing queues indexed by topic name to ensure sequential processing
+   * @type {Map<string,Promise>}
+   */
+  #processingQueues;
+  /**
    * Logger
    * @type {Logger}
    */
@@ -569,6 +574,7 @@ var PubSubApiClient = class {
     this.#logger = logger;
     this.#schemaChache = new SchemaCache();
     this.#subscriptions = /* @__PURE__ */ new Map();
+    this.#processingQueues = /* @__PURE__ */ new Map();
     try {
       this.#config = AuthConfiguration.load(config);
     } catch (error) {
@@ -761,79 +767,11 @@ var PubSubApiClient = class {
           this.#logger.info(
             `${topicName} - Received ${data.events.length} events, latest replay ID: ${latestReplayId}`
           );
-          const sortedEvents = [...data.events].sort((a, b) => {
-            const replayIdA = decodeReplayId(a.replayId);
-            const replayIdB = decodeReplayId(b.replayId);
-            return replayIdA - replayIdB;
+          const currentProcessing = this.#processingQueues.get(topicName) || Promise.resolve();
+          const nextProcessing = currentProcessing.then(async () => {
+            await this.#processEventBatch(data.events, topicName, subscribeCallback, isInfiniteEventRequest);
           });
-          for (const event of sortedEvents) {
-            try {
-              this.#logger.debug(
-                `${topicName} - Raw event: ${toJsonString(event)}`
-              );
-              this.#logger.debug(
-                `${topicName} - Retrieving schema ID: ${event.event.schemaId}`
-              );
-              const schema = await this.#getEventSchemaFromId(
-                event.event.schemaId
-              );
-              const subscription2 = this.#subscriptions.get(topicName);
-              if (!subscription2) {
-                throw new Error(
-                  `Failed to retrieve subscription for topic ${topicName}.`
-                );
-              }
-              subscription2.info.receivedEventCount++;
-              const parsedEvent = parseEvent(schema, event, topicName);
-              this.#logger.debug(
-                `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`
-              );
-              const callbackResult = subscribeCallback(
-                subscription2.info,
-                SubscribeCallbackType.EVENT,
-                parsedEvent
-              );
-              if (callbackResult && typeof callbackResult.then === "function") {
-                await callbackResult;
-              }
-            } catch (error) {
-              let replayId;
-              try {
-                replayId = decodeReplayId(event.replayId);
-              } catch (error2) {
-              }
-              const message = replayId ? `Failed to parse event with replay ID ${replayId}` : `Failed to parse event with unknown replay ID (latest replay ID was ${latestReplayId})`;
-              const parseError = new EventParseError(
-                message,
-                error,
-                replayId,
-                event,
-                latestReplayId
-              );
-              subscribeCallback(
-                subscription.info,
-                SubscribeCallbackType.ERROR,
-                parseError
-              );
-              this.#logger.error(parseError);
-            }
-            if (subscription.info.receivedEventCount === subscription.info.requestedEventCount) {
-              this.#logger.debug(
-                `${topicName} - Reached last of ${subscription.info.requestedEventCount} requested event on channel.`
-              );
-              if (isInfiniteEventRequest) {
-                this.requestAdditionalEvents(
-                  subscription.info.topicName,
-                  subscription.info.requestedEventCount
-                );
-              } else {
-                subscribeCallback(
-                  subscription.info,
-                  SubscribeCallbackType.LAST_EVENT
-                );
-              }
-            }
-          }
+          this.#processingQueues.set(topicName, nextProcessing);
         } else {
           this.#logger.debug(
             `${topicName} - Received keepalive message. Latest replay ID: ${latestReplayId}`
@@ -847,6 +785,7 @@ var PubSubApiClient = class {
       });
       grpcSubscription.on("end", () => {
         this.#subscriptions.delete(topicName);
+        this.#processingQueues.delete(topicName);
         this.#logger.info(`${topicName} - gRPC stream ended`);
         subscribeCallback(subscription.info, SubscribeCallbackType.END);
       });
@@ -960,8 +899,93 @@ var PubSubApiClient = class {
   close() {
     this.#logger.info("Clear subscriptions");
     this.#subscriptions.clear();
+    this.#processingQueues.clear();
     this.#logger.info("Closing gRPC stream");
     this.#client?.close();
+  }
+  /**
+   * Processes a batch of events sequentially to maintain order
+   * @param {Array} events Array of events to process
+   * @param {string} topicName Topic name
+   * @param {SubscribeCallback} subscribeCallback Callback function
+   * @param {boolean} isInfiniteEventRequest Whether this is an infinite event request
+   */
+  async #processEventBatch(events, topicName, subscribeCallback, isInfiniteEventRequest) {
+    const sortedEvents = [...events].sort((a, b) => {
+      const replayIdA = decodeReplayId(a.replayId);
+      const replayIdB = decodeReplayId(b.replayId);
+      return replayIdA - replayIdB;
+    });
+    for (const event of sortedEvents) {
+      try {
+        this.#logger.debug(
+          `${topicName} - Raw event: ${toJsonString(event)}`
+        );
+        this.#logger.debug(
+          `${topicName} - Retrieving schema ID: ${event.event.schemaId}`
+        );
+        const schema = await this.#getEventSchemaFromId(
+          event.event.schemaId
+        );
+        const subscription2 = this.#subscriptions.get(topicName);
+        if (!subscription2) {
+          throw new Error(
+            `Failed to retrieve subscription for topic ${topicName}.`
+          );
+        }
+        subscription2.info.receivedEventCount++;
+        const parsedEvent = parseEvent(schema, event, topicName);
+        this.#logger.debug(
+          `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`
+        );
+        const callbackResult = subscribeCallback(
+          subscription2.info,
+          SubscribeCallbackType.EVENT,
+          parsedEvent
+        );
+        if (callbackResult && typeof callbackResult.then === "function") {
+          await callbackResult;
+        }
+      } catch (error) {
+        let replayId;
+        try {
+          replayId = decodeReplayId(event.replayId);
+        } catch (error2) {
+        }
+        const latestReplayId = decodeReplayId(this.#subscriptions.get(topicName)?.info?.lastReplayId || Buffer.alloc(8));
+        const message = replayId ? `Failed to parse event with replay ID ${replayId}` : `Failed to parse event with unknown replay ID (latest replay ID was ${latestReplayId})`;
+        const parseError = new EventParseError(
+          message,
+          error,
+          replayId,
+          event,
+          latestReplayId
+        );
+        subscribeCallback(
+          this.#subscriptions.get(topicName)?.info,
+          SubscribeCallbackType.ERROR,
+          parseError
+        );
+        this.#logger.error(parseError);
+      }
+      const subscription = this.#subscriptions.get(topicName);
+      if (subscription && subscription.info.receivedEventCount === subscription.info.requestedEventCount) {
+        this.#logger.debug(
+          `${topicName} - Reached last of ${subscription.info.requestedEventCount} requested event on channel.`
+        );
+        if (isInfiniteEventRequest) {
+          this.requestAdditionalEvents(
+            subscription.info.topicName,
+            subscription.info.requestedEventCount
+          );
+        } else {
+          subscribeCallback(
+            subscription.info,
+            SubscribeCallbackType.LAST_EVENT
+          );
+        }
+      }
+    }
   }
   /**
    * Retrieves an event schema from the cache based on its ID.

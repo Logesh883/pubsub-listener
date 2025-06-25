@@ -138,6 +138,12 @@ export default class PubSubApiClient {
   #subscriptions;
 
   /**
+   * Map of processing queues indexed by topic name to ensure sequential processing
+   * @type {Map<string,Promise>}
+   */
+  #processingQueues;
+
+  /**
    * Logger
    * @type {Logger}
    */
@@ -152,6 +158,7 @@ export default class PubSubApiClient {
     this.#logger = logger;
     this.#schemaChache = new SchemaCache();
     this.#subscriptions = new Map();
+    this.#processingQueues = new Map();
     // Check and load config
     try {
       this.#config = AuthConfiguration.load(config);
@@ -378,100 +385,12 @@ export default class PubSubApiClient {
             `${topicName} - Received ${data.events.length} events, latest replay ID: ${latestReplayId}`,
           );
 
-          // Sort events by replay ID to ensure proper ordering
-          const sortedEvents = [...data.events].sort((a, b) => {
-            const replayIdA = decodeReplayId(a.replayId);
-            const replayIdB = decodeReplayId(b.replayId);
-            return replayIdA - replayIdB;
+          // Queue the processing to ensure batches are processed sequentially
+          const currentProcessing = this.#processingQueues.get(topicName) || Promise.resolve();
+          const nextProcessing = currentProcessing.then(async () => {
+            await this.#processEventBatch(data.events, topicName, subscribeCallback, isInfiniteEventRequest);
           });
-
-          // Process events sequentially to maintain order
-          for (const event of sortedEvents) {
-            try {
-              this.#logger.debug(
-                `${topicName} - Raw event: ${toJsonString(event)}`,
-              );
-              // Load event schema from cache or from the gRPC client
-              this.#logger.debug(
-                `${topicName} - Retrieving schema ID: ${event.event.schemaId}`,
-              );
-              const schema = await this.#getEventSchemaFromId(
-                event.event.schemaId,
-              );
-              // Retrieve subscription
-              const subscription = this.#subscriptions.get(topicName);
-              if (!subscription) {
-                throw new Error(
-                  `Failed to retrieve subscription for topic ${topicName}.`,
-                );
-              }
-              subscription.info.receivedEventCount++;
-              // Parse event thanks to schema
-              const parsedEvent = parseEvent(schema, event, topicName);
-
-              this.#logger.debug(
-                `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`,
-              );
-
-              // Call the callback and wait if it returns a Promise to ensure order
-              const callbackResult = subscribeCallback(
-                subscription.info,
-                SubscribeCallbackType.EVENT,
-                parsedEvent,
-              );
-
-              // If the callback returns a Promise, wait for it to complete
-              if (callbackResult && typeof callbackResult.then === 'function') {
-                await callbackResult;
-              }
-            } catch (error) {
-              // Report event parsing error with replay ID if possible
-              let replayId;
-              try {
-                replayId = decodeReplayId(event.replayId);
-                // eslint-disable-next-line no-empty, no-unused-vars
-              } catch (error) {}
-              const message = replayId
-                ? `Failed to parse event with replay ID ${replayId}`
-                : `Failed to parse event with unknown replay ID (latest replay ID was ${latestReplayId})`;
-              const parseError = new EventParseError(
-                message,
-                error,
-                replayId,
-                event,
-                latestReplayId,
-              );
-              subscribeCallback(
-                subscription.info,
-                SubscribeCallbackType.ERROR,
-                parseError,
-              );
-              this.#logger.error(parseError);
-            }
-
-            // Handle last requested event
-            if (
-              subscription.info.receivedEventCount ===
-              subscription.info.requestedEventCount
-            ) {
-              this.#logger.debug(
-                `${topicName} - Reached last of ${subscription.info.requestedEventCount} requested event on channel.`,
-              );
-              if (isInfiniteEventRequest) {
-                // Request additional events
-                this.requestAdditionalEvents(
-                  subscription.info.topicName,
-                  subscription.info.requestedEventCount,
-                );
-              } else {
-                // Emit a 'lastevent' event when reaching the last requested event count
-                subscribeCallback(
-                  subscription.info,
-                  SubscribeCallbackType.LAST_EVENT,
-                );
-              }
-            }
-          }
+          this.#processingQueues.set(topicName, nextProcessing);
         } else {
           // If there are no events then, every 270 seconds (or less) the server publishes a keepalive message with
           // the latestReplayId and pendingNumRequested (the number of events that the client is still waiting for)
@@ -487,6 +406,7 @@ export default class PubSubApiClient {
       });
       grpcSubscription.on('end', () => {
         this.#subscriptions.delete(topicName);
+        this.#processingQueues.delete(topicName);
         this.#logger.info(`${topicName} - gRPC stream ended`);
         subscribeCallback(subscription.info, SubscribeCallbackType.END);
       });
@@ -607,9 +527,114 @@ export default class PubSubApiClient {
   close() {
     this.#logger.info('Clear subscriptions');
     this.#subscriptions.clear();
+    this.#processingQueues.clear();
 
     this.#logger.info('Closing gRPC stream');
     this.#client?.close();
+  }
+
+  /**
+   * Processes a batch of events sequentially to maintain order
+   * @param {Array} events Array of events to process
+   * @param {string} topicName Topic name
+   * @param {SubscribeCallback} subscribeCallback Callback function
+   * @param {boolean} isInfiniteEventRequest Whether this is an infinite event request
+   */
+  async #processEventBatch(events, topicName, subscribeCallback, isInfiniteEventRequest) {
+    // Sort events by replay ID to ensure proper ordering
+    const sortedEvents = [...events].sort((a, b) => {
+      const replayIdA = decodeReplayId(a.replayId);
+      const replayIdB = decodeReplayId(b.replayId);
+      return replayIdA - replayIdB;
+    });
+
+    // Process events sequentially to maintain order
+    for (const event of sortedEvents) {
+      try {
+        this.#logger.debug(
+          `${topicName} - Raw event: ${toJsonString(event)}`,
+        );
+        // Load event schema from cache or from the gRPC client
+        this.#logger.debug(
+          `${topicName} - Retrieving schema ID: ${event.event.schemaId}`,
+        );
+        const schema = await this.#getEventSchemaFromId(
+          event.event.schemaId,
+        );
+        // Retrieve subscription
+        const subscription = this.#subscriptions.get(topicName);
+        if (!subscription) {
+          throw new Error(
+            `Failed to retrieve subscription for topic ${topicName}.`,
+          );
+        }
+        subscription.info.receivedEventCount++;
+        // Parse event thanks to schema
+        const parsedEvent = parseEvent(schema, event, topicName);
+
+        this.#logger.debug(
+          `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`,
+        );
+
+        // Call the callback and wait if it returns a Promise to ensure order
+        const callbackResult = subscribeCallback(
+          subscription.info,
+          SubscribeCallbackType.EVENT,
+          parsedEvent,
+        );
+
+        // If the callback returns a Promise, wait for it to complete
+        if (callbackResult && typeof callbackResult.then === 'function') {
+          await callbackResult;
+        }
+      } catch (error) {
+        // Report event parsing error with replay ID if possible
+        let replayId;
+        try {
+          replayId = decodeReplayId(event.replayId);
+          // eslint-disable-next-line no-empty, no-unused-vars
+        } catch (error) {}
+        const latestReplayId = decodeReplayId(this.#subscriptions.get(topicName)?.info?.lastReplayId || Buffer.alloc(8));
+        const message = replayId
+          ? `Failed to parse event with replay ID ${replayId}`
+          : `Failed to parse event with unknown replay ID (latest replay ID was ${latestReplayId})`;
+        const parseError = new EventParseError(
+          message,
+          error,
+          replayId,
+          event,
+          latestReplayId,
+        );
+        subscribeCallback(
+          this.#subscriptions.get(topicName)?.info,
+          SubscribeCallbackType.ERROR,
+          parseError,
+        );
+        this.#logger.error(parseError);
+      }
+
+      // Handle last requested event
+      const subscription = this.#subscriptions.get(topicName);
+      if (subscription &&
+          subscription.info.receivedEventCount === subscription.info.requestedEventCount) {
+        this.#logger.debug(
+          `${topicName} - Reached last of ${subscription.info.requestedEventCount} requested event on channel.`,
+        );
+        if (isInfiniteEventRequest) {
+          // Request additional events
+          this.requestAdditionalEvents(
+            subscription.info.topicName,
+            subscription.info.requestedEventCount,
+          );
+        } else {
+          // Emit a 'lastevent' event when reaching the last requested event count
+          subscribeCallback(
+            subscription.info,
+            SubscribeCallbackType.LAST_EVENT,
+          );
+        }
+      }
+    }
   }
 
   /**
