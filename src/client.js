@@ -381,14 +381,21 @@ export default class PubSubApiClient {
         const latestReplayId = decodeReplayId(data.latestReplayId);
         subscription.info.lastReplayId = latestReplayId;
         if (data.events) {
+          const hasQueuedProcessing = this.#processingQueues.has(topicName);
           this.#logger.info(
-            `${topicName} - Received ${data.events.length} events, latest replay ID: ${latestReplayId}`,
+            `${topicName} - Received ${data.events.length} events, latest replay ID: ${latestReplayId}${hasQueuedProcessing ? ' [QUEUED - waiting for previous batch]' : ' [PROCESSING IMMEDIATELY]'}`,
           );
 
           // Queue the processing to ensure batches are processed sequentially
           const currentProcessing = this.#processingQueues.get(topicName) || Promise.resolve();
           const nextProcessing = currentProcessing.then(async () => {
+            this.#logger.debug(
+              `${topicName} - Starting batch processing: ${data.events.length} events`,
+            );
             await this.#processEventBatch(data.events, topicName, subscribeCallback, isInfiniteEventRequest);
+            this.#logger.debug(
+              `${topicName} - Completed batch processing: ${data.events.length} events`,
+            );
           });
           this.#processingQueues.set(topicName, nextProcessing);
         } else {
@@ -406,8 +413,8 @@ export default class PubSubApiClient {
       });
       grpcSubscription.on('end', () => {
         this.#subscriptions.delete(topicName);
-        this.#processingQueues.delete(topicName);
-        this.#logger.info(`${topicName} - gRPC stream ended`);
+        const hadQueue = this.#processingQueues.delete(topicName);
+        this.#logger.info(`${topicName} - gRPC stream ended${hadQueue ? ' [processing queue cleaned up]' : ''}`);
         subscribeCallback(subscription.info, SubscribeCallbackType.END);
       });
       grpcSubscription.on('error', (error) => {
@@ -525,7 +532,10 @@ export default class PubSubApiClient {
    * @memberof PubSubApiClient.prototype
    */
   close() {
-    this.#logger.info('Clear subscriptions');
+    const subscriptionCount = this.#subscriptions.size;
+    const queueCount = this.#processingQueues.size;
+
+    this.#logger.info(`Clearing ${subscriptionCount} subscriptions and ${queueCount} processing queues`);
     this.#subscriptions.clear();
     this.#processingQueues.clear();
 
@@ -541,6 +551,8 @@ export default class PubSubApiClient {
    * @param {boolean} isInfiniteEventRequest Whether this is an infinite event request
    */
   async #processEventBatch(events, topicName, subscribeCallback, isInfiniteEventRequest) {
+    const batchStartTime = Date.now();
+
     // Sort events by replay ID to ensure proper ordering
     const sortedEvents = [...events].sort((a, b) => {
       const replayIdA = decodeReplayId(a.replayId);
@@ -548,12 +560,37 @@ export default class PubSubApiClient {
       return replayIdA - replayIdB;
     });
 
+    // Log the replay ID range for this batch
+    const firstReplayId = decodeReplayId(sortedEvents[0].replayId);
+    const lastReplayId = decodeReplayId(sortedEvents[sortedEvents.length - 1].replayId);
+    this.#logger.info(
+      `${topicName} - Processing batch: ${events.length} events (Replay IDs: ${firstReplayId} - ${lastReplayId})`,
+    );
+
+    // Check if events were out of order before sorting
+    const wasOutOfOrder = events.some((event, index) => {
+      if (index === 0) return false;
+      const currentReplayId = decodeReplayId(event.replayId);
+      const previousReplayId = decodeReplayId(events[index - 1].replayId);
+      return currentReplayId < previousReplayId;
+    });
+
+    if (wasOutOfOrder) {
+      this.#logger.warn(
+        `${topicName} - Events were received out of order, sorted by replay ID`,
+      );
+    }
+
     // Process events sequentially to maintain order
-    for (const event of sortedEvents) {
+    for (let i = 0; i < sortedEvents.length; i++) {
+      const event = sortedEvents[i];
+      const eventStartTime = Date.now();
       try {
+        const replayId = decodeReplayId(event.replayId);
         this.#logger.debug(
-          `${topicName} - Raw event: ${toJsonString(event)}`,
+          `${topicName} - Processing event ${i + 1}/${sortedEvents.length} (Replay ID: ${replayId})`,
         );
+
         // Load event schema from cache or from the gRPC client
         this.#logger.debug(
           `${topicName} - Retrieving schema ID: ${event.event.schemaId}`,
@@ -561,6 +598,7 @@ export default class PubSubApiClient {
         const schema = await this.#getEventSchemaFromId(
           event.event.schemaId,
         );
+
         // Retrieve subscription
         const subscription = this.#subscriptions.get(topicName);
         if (!subscription) {
@@ -569,14 +607,16 @@ export default class PubSubApiClient {
           );
         }
         subscription.info.receivedEventCount++;
+
         // Parse event thanks to schema
         const parsedEvent = parseEvent(schema, event, topicName);
 
         this.#logger.debug(
-          `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`,
+          `${topicName} - Calling subscriber callback for event (Replay ID: ${replayId})`,
         );
 
         // Call the callback and wait if it returns a Promise to ensure order
+        const callbackStartTime = Date.now();
         const callbackResult = subscribeCallback(
           subscription.info,
           SubscribeCallbackType.EVENT,
@@ -585,8 +625,17 @@ export default class PubSubApiClient {
 
         // If the callback returns a Promise, wait for it to complete
         if (callbackResult && typeof callbackResult.then === 'function') {
+          this.#logger.debug(
+            `${topicName} - Waiting for async callback to complete (Replay ID: ${replayId})`,
+          );
           await callbackResult;
         }
+
+        const callbackDuration = Date.now() - callbackStartTime;
+        const eventDuration = Date.now() - eventStartTime;
+        this.#logger.debug(
+          `${topicName} - Completed event processing (Replay ID: ${replayId}, Event: ${eventDuration}ms, Callback: ${callbackDuration}ms)`,
+        );
       } catch (error) {
         // Report event parsing error with replay ID if possible
         let replayId;
@@ -598,6 +647,11 @@ export default class PubSubApiClient {
         const message = replayId
           ? `Failed to parse event with replay ID ${replayId}`
           : `Failed to parse event with unknown replay ID (latest replay ID was ${latestReplayId})`;
+
+        this.#logger.error(
+          `${topicName} - Error processing event ${i + 1}/${sortedEvents.length} (Replay ID: ${replayId || 'unknown'}): ${error.message}`,
+        );
+
         const parseError = new EventParseError(
           message,
           error,
@@ -635,6 +689,11 @@ export default class PubSubApiClient {
         }
       }
     }
+
+    const batchDuration = Date.now() - batchStartTime;
+    this.#logger.info(
+      `${topicName} - Batch processing completed: ${events.length} events processed in ${batchDuration}ms`,
+    );
   }
 
   /**
