@@ -761,7 +761,13 @@ var PubSubApiClient = class {
           this.#logger.info(
             `${topicName} - Received ${data.events.length} events, latest replay ID: ${latestReplayId}`
           );
-          for (const event of data.events) {
+          const sortedEvents = [...data.events].sort((a, b) => {
+            const replayIdA = decodeReplayId(a.replayId);
+            const replayIdB = decodeReplayId(b.replayId);
+            return replayIdA - replayIdB;
+          });
+          console.log("sortedEvents", sortedEvents);
+          for (const event of sortedEvents) {
             try {
               this.#logger.debug(
                 `${topicName} - Raw event: ${toJsonString(event)}`
