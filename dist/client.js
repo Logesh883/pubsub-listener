@@ -733,7 +733,6 @@ var PubSubApiClient = class {
             const replayIdB = decodeReplayId(b.replayId);
             return replayIdA - replayIdB;
           });
-          console.log("sortedEvents", sortedEvents);
           for (const event of sortedEvents) {
             try {
               this.#logger.debug(
@@ -756,11 +755,14 @@ var PubSubApiClient = class {
               this.#logger.debug(
                 `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`
               );
-              subscribeCallback(
+              const callbackResult = subscribeCallback(
                 subscription2.info,
                 SubscribeCallbackType.EVENT,
                 parsedEvent
               );
+              if (callbackResult && typeof callbackResult.then === "function") {
+                await callbackResult;
+              }
             } catch (error) {
               let replayId;
               try {

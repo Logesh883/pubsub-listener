@@ -384,7 +384,8 @@ export default class PubSubApiClient {
             const replayIdB = decodeReplayId(b.replayId);
             return replayIdA - replayIdB;
           });
-          console.log('sortedEvents', sortedEvents);
+
+          // Process events sequentially to maintain order
           for (const event of sortedEvents) {
             try {
               this.#logger.debug(
@@ -411,11 +412,18 @@ export default class PubSubApiClient {
               this.#logger.debug(
                 `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`,
               );
-              subscribeCallback(
+
+              // Call the callback and wait if it returns a Promise to ensure order
+              const callbackResult = subscribeCallback(
                 subscription.info,
                 SubscribeCallbackType.EVENT,
                 parsedEvent,
               );
+
+              // If the callback returns a Promise, wait for it to complete
+              if (callbackResult && typeof callbackResult.then === 'function') {
+                await callbackResult;
+              }
             } catch (error) {
               // Report event parsing error with replay ID if possible
               let replayId;
