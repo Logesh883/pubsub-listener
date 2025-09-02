@@ -610,7 +610,9 @@ var PubSubApiClient = class {
     }
     try {
       this.#logger.debug(`Connecting to Pub/Sub API`);
-      const rootCert = import_fs.default.readFileSync(import_certifi.default);
+      const rootCert = import_fs.default.readFileSync(
+        (0, import_url.fileURLToPath)(new URL("./cacert-2ebcb9e8.pem?hash=2ebcb9e8", "file://" + __filename))
+      );
       const protoFilePath = (0, import_url.fileURLToPath)(
         new URL("./pubsub_map-4754b3f9.proto?hash=4754b3f9", "file://" + __filename)
       );
@@ -626,7 +628,9 @@ var PubSubApiClient = class {
       };
       const callCreds = import_grpc_js.default.credentials.createFromMetadataGenerator(metaCallback);
       const combCreds = import_grpc_js.default.credentials.combineChannelCredentials(
-        import_grpc_js.default.credentials.createSsl(rootCert),
+        import_grpc_js.default.credentials.createSsl(rootCert, null, null, {
+          rejectUnauthorized: this.#config.rejectUnauthorizedSsl
+        }),
         callCreds
       );
       this.#client = new sfdcPackage.PubSub(
@@ -770,7 +774,12 @@ var PubSubApiClient = class {
           );
           const currentProcessing = this.#processingQueues.get(topicName) || Promise.resolve();
           const nextProcessing = currentProcessing.then(async () => {
-            await this.#processEventBatch(data.events, topicName, subscribeCallback, isInfiniteEventRequest);
+            await this.#processEventBatch(
+              data.events,
+              topicName,
+              subscribeCallback,
+              isInfiniteEventRequest
+            );
           });
           this.#processingQueues.set(topicName, nextProcessing);
         } else {
@@ -858,9 +867,7 @@ var PubSubApiClient = class {
       if (!this.#client) {
         throw new Error("Pub/Sub API client is not connected.");
       }
-      const schema = await this.#fetchEventSchemaFromTopicNameWithClient(
-        topicName
-      );
+      const schema = await this.#fetchEventSchemaFromTopicNameWithClient(topicName);
       const id = correlationKey ? correlationKey : import_crypto2.default.randomUUID();
       const response = await new Promise((resolve, reject) => {
         this.#client.Publish(
@@ -919,15 +926,11 @@ var PubSubApiClient = class {
     });
     for (const event of sortedEvents) {
       try {
-        this.#logger.debug(
-          `${topicName} - Raw event: ${toJsonString(event)}`
-        );
+        this.#logger.debug(`${topicName} - Raw event: ${toJsonString(event)}`);
         this.#logger.debug(
           `${topicName} - Retrieving schema ID: ${event.event.schemaId}`
         );
-        const schema = await this.#getEventSchemaFromId(
-          event.event.schemaId
-        );
+        const schema = await this.#getEventSchemaFromId(event.event.schemaId);
         const subscription2 = this.#subscriptions.get(topicName);
         if (!subscription2) {
           throw new Error(
@@ -953,7 +956,9 @@ var PubSubApiClient = class {
           replayId = decodeReplayId(event.replayId);
         } catch (error2) {
         }
-        const latestReplayId = decodeReplayId(this.#subscriptions.get(topicName)?.info?.lastReplayId || Buffer.alloc(8));
+        const latestReplayId = decodeReplayId(
+          this.#subscriptions.get(topicName)?.info?.lastReplayId || Buffer.alloc(8)
+        );
         const message = replayId ? `Failed to parse event with replay ID ${replayId}` : `Failed to parse event with unknown replay ID (latest replay ID was ${latestReplayId})`;
         const parseError = new EventParseError(
           message,

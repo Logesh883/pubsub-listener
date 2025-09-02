@@ -1,37 +1,37 @@
-import crypto from 'crypto';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
+import crypto from "crypto";
+import fs from "fs";
+import { fileURLToPath } from "url";
 
-import avro from 'avro-js';
-import certifi from 'certifi';
-import grpc from '@grpc/grpc-js';
-import protoLoader from '@grpc/proto-loader';
+import avro from "avro-js";
+import certifi from "certifi";
+import grpc from "@grpc/grpc-js";
+import protoLoader from "@grpc/proto-loader";
 // eslint-disable-next-line no-unused-vars
-import { connectivityState } from '@grpc/grpc-js';
+import { connectivityState } from "@grpc/grpc-js";
 
-import SchemaCache from './utils/schemaCache.js';
-import EventParseError from './utils/eventParseError.js';
-import { CustomLongAvroType } from './utils/avroHelper.js';
-import { AuthType, AuthConfiguration } from './utils/configuration.js';
+import SchemaCache from "./utils/schemaCache.js";
+import EventParseError from "./utils/eventParseError.js";
+import { CustomLongAvroType } from "./utils/avroHelper.js";
+import { AuthType, AuthConfiguration } from "./utils/configuration.js";
 import {
   parseEvent,
   encodeReplayId,
   decodeReplayId,
   toJsonString,
-} from './utils/eventParser.js';
-import SalesforceAuth from './utils/auth.js';
+} from "./utils/eventParser.js";
+import SalesforceAuth from "./utils/auth.js";
 
 /**
  * Enum for subscripe callback type values
  * @enum {string}
  */
 const SubscribeCallbackType = {
-  EVENT: 'event',
-  LAST_EVENT: 'lastEvent',
-  ERROR: 'error',
-  END: 'end',
-  GRPC_STATUS: 'grpcStatus',
-  GRPC_KEEP_ALIVE: 'grpcKeepAlive',
+  EVENT: "event",
+  LAST_EVENT: "lastEvent",
+  ERROR: "error",
+  END: "end",
+  GRPC_STATUS: "grpcStatus",
+  GRPC_KEEP_ALIVE: "grpcKeepAlive",
 };
 
 /**
@@ -80,6 +80,7 @@ const SubscribeCallbackType = {
  * @property {string} [accessToken]
  * @property {string} [instanceUrl]
  * @property {string} [organizationId]
+ * @property {boolean} [rejectUnauthorizedSsl]
  * @protected
  */
 
@@ -164,7 +165,7 @@ export default class PubSubApiClient {
       this.#config = AuthConfiguration.load(config);
     } catch (error) {
       this.#logger.error(error);
-      throw new Error('Failed to initialize Pub/Sub API client', {
+      throw new Error("Failed to initialize Pub/Sub API client", {
         cause: error,
       });
     }
@@ -190,10 +191,10 @@ export default class PubSubApiClient {
         this.#logger.info(
           `Connected to Salesforce org ${conMetadata.instanceUrl} (${
             this.#config.organizationId
-          }) as ${conMetadata.username}`,
+          }) as ${conMetadata.username}`
         );
       } catch (error) {
-        throw new Error('Failed to authenticate with Salesforce', {
+        throw new Error("Failed to authenticate with Salesforce", {
           cause: error,
         });
       }
@@ -203,11 +204,13 @@ export default class PubSubApiClient {
     try {
       this.#logger.debug(`Connecting to Pub/Sub API`);
       // Read certificates
-      const rootCert = fs.readFileSync(certifi);
+      const rootCert = fs.readFileSync(
+        fileURLToPath(new URL("./certs/cacert.pem", import.meta.url))
+      );
 
       // Load proto definition
       const protoFilePath = fileURLToPath(
-        new URL('../pubsub_map.proto', import.meta.url),
+        new URL("../pubsub_map.proto", import.meta.url)
       );
       const packageDef = protoLoader.loadSync(protoFilePath, {});
       const grpcObj = grpc.loadPackageDefinition(packageDef);
@@ -216,28 +219,30 @@ export default class PubSubApiClient {
       // Prepare gRPC connection
       const metaCallback = (_params, callback) => {
         const meta = new grpc.Metadata();
-        meta.add('accesstoken', this.#config.accessToken);
-        meta.add('instanceurl', this.#config.instanceUrl);
-        meta.add('tenantid', this.#config.organizationId);
+        meta.add("accesstoken", this.#config.accessToken);
+        meta.add("instanceurl", this.#config.instanceUrl);
+        meta.add("tenantid", this.#config.organizationId);
         callback(null, meta);
       };
       const callCreds =
         grpc.credentials.createFromMetadataGenerator(metaCallback);
       const combCreds = grpc.credentials.combineChannelCredentials(
-        grpc.credentials.createSsl(rootCert),
-        callCreds,
+        grpc.credentials.createSsl(rootCert, null, null, {
+          rejectUnauthorized: this.#config.rejectUnauthorizedSsl,
+        }),
+        callCreds
       );
 
       // Return pub/sub gRPC client
       this.#client = new sfdcPackage.PubSub(
         this.#config.pubSubEndpoint,
-        combCreds,
+        combCreds
       );
       this.#logger.info(
-        `Connected to Pub/Sub API endpoint ${this.#config.pubSubEndpoint}`,
+        `Connected to Pub/Sub API endpoint ${this.#config.pubSubEndpoint}`
       );
     } catch (error) {
-      throw new Error('Failed to connect to Pub/Sub API', {
+      throw new Error("Failed to connect to Pub/Sub API", {
         cause: error,
       });
     }
@@ -262,7 +267,7 @@ export default class PubSubApiClient {
   subscribeFromEarliestEvent(
     topicName,
     subscribeCallback,
-    numRequested = null,
+    numRequested = null
   ) {
     this.#subscribe(
       {
@@ -270,7 +275,7 @@ export default class PubSubApiClient {
         numRequested,
         replayPreset: 1,
       },
-      subscribeCallback,
+      subscribeCallback
     );
   }
 
@@ -290,7 +295,7 @@ export default class PubSubApiClient {
         replayPreset: 2,
         replayId: encodeReplayId(replayId),
       },
-      subscribeCallback,
+      subscribeCallback
     );
   }
 
@@ -307,7 +312,7 @@ export default class PubSubApiClient {
         topicName,
         numRequested,
       },
-      subscribeCallback,
+      subscribeCallback
     );
   }
 
@@ -318,7 +323,7 @@ export default class PubSubApiClient {
    */
   #subscribe(subscribeRequest, subscribeCallback) {
     this.#logger.debug(
-      `Preparing subscribe request: ${JSON.stringify(subscribeRequest)}`,
+      `Preparing subscribe request: ${JSON.stringify(subscribeRequest)}`
     );
     let { topicName, numRequested } = subscribeRequest;
     try {
@@ -328,26 +333,26 @@ export default class PubSubApiClient {
         isInfiniteEventRequest = true;
         subscribeRequest.numRequested = numRequested = MAX_EVENT_BATCH_SIZE;
       } else {
-        if (typeof numRequested !== 'number') {
+        if (typeof numRequested !== "number") {
           throw new Error(
-            `Expected a number type for number of requested events but got ${typeof numRequested}`,
+            `Expected a number type for number of requested events but got ${typeof numRequested}`
           );
         }
         if (!Number.isSafeInteger(numRequested) || numRequested < 1) {
           throw new Error(
-            `Expected an integer greater than 1 for number of requested events but got ${numRequested}`,
+            `Expected an integer greater than 1 for number of requested events but got ${numRequested}`
           );
         }
         if (numRequested > MAX_EVENT_BATCH_SIZE) {
           this.#logger.warn(
-            `The number of requested events for ${topicName} exceeds max event batch size (${MAX_EVENT_BATCH_SIZE}).`,
+            `The number of requested events for ${topicName} exceeds max event batch size (${MAX_EVENT_BATCH_SIZE}).`
           );
           subscribeRequest.numRequested = MAX_EVENT_BATCH_SIZE;
         }
       }
       // Check client connection
       if (!this.#client) {
-        throw new Error('Pub/Sub API client is not connected.');
+        throw new Error("Pub/Sub API client is not connected.");
       }
 
       // Check for an existing subscription
@@ -377,64 +382,70 @@ export default class PubSubApiClient {
       }
 
       // Listen to new events
-      grpcSubscription.on('data', async (data) => {
+      grpcSubscription.on("data", async (data) => {
         const latestReplayId = decodeReplayId(data.latestReplayId);
         subscription.info.lastReplayId = latestReplayId;
         if (data.events) {
           const hasQueuedProcessing = this.#processingQueues.has(topicName);
           this.#logger.info(
-            `${topicName} - Received ${data.events.length} events, latest replay ID: ${latestReplayId}${hasQueuedProcessing ? ' [QUEUED - waiting for previous batch]' : ' [PROCESSING IMMEDIATELY]'}`,
+            `${topicName} - Received ${data.events.length} events, latest replay ID: ${latestReplayId}${hasQueuedProcessing ? " [QUEUED - waiting for previous batch]" : " [PROCESSING IMMEDIATELY]"}`
           );
 
           // Queue the processing to ensure batches are processed sequentially
-          const currentProcessing = this.#processingQueues.get(topicName) || Promise.resolve();
+          const currentProcessing =
+            this.#processingQueues.get(topicName) || Promise.resolve();
           const nextProcessing = currentProcessing.then(async () => {
-            await this.#processEventBatch(data.events, topicName, subscribeCallback, isInfiniteEventRequest);
+            await this.#processEventBatch(
+              data.events,
+              topicName,
+              subscribeCallback,
+              isInfiniteEventRequest
+            );
           });
           this.#processingQueues.set(topicName, nextProcessing);
         } else {
           // If there are no events then, every 270 seconds (or less) the server publishes a keepalive message with
           // the latestReplayId and pendingNumRequested (the number of events that the client is still waiting for)
           this.#logger.debug(
-            `${topicName} - Received keepalive message. Latest replay ID: ${latestReplayId}`,
+            `${topicName} - Received keepalive message. Latest replay ID: ${latestReplayId}`
           );
           data.latestReplayId = latestReplayId; // Replace original value with decoded value
           subscribeCallback(
             subscription.info,
-            SubscribeCallbackType.GRPC_KEEP_ALIVE,
+            SubscribeCallbackType.GRPC_KEEP_ALIVE
           );
         }
       });
-      grpcSubscription.on('end', () => {
+      grpcSubscription.on("end", () => {
         this.#subscriptions.delete(topicName);
         this.#processingQueues.delete(topicName);
         this.#logger.info(`${topicName} - gRPC stream ended`);
         subscribeCallback(subscription.info, SubscribeCallbackType.END);
       });
-      grpcSubscription.on('error', (error) => {
+      grpcSubscription.on("error", (error) => {
         this.#logger.error(
-          `${topicName} - gRPC stream error: ${JSON.stringify(error)}`,
+          `${topicName} - gRPC stream error: ${JSON.stringify(error)}`
         );
         subscribeCallback(
           subscription.info,
           SubscribeCallbackType.ERROR,
-          error,
+          error
         );
       });
-      grpcSubscription.on('status', (status) => {
+      grpcSubscription.on("status", (status) => {
         this.#logger.info(
-          `${topicName} - gRPC stream status: ${JSON.stringify(status)}`,
+          `${topicName} - gRPC stream status: ${JSON.stringify(status)}`
         );
         subscribeCallback(
           subscription.info,
           SubscribeCallbackType.GRPC_STATUS,
-          status,
+          status
         );
       });
 
       grpcSubscription.write(subscribeRequest);
       this.#logger.info(
-        `${topicName} - Subscribe request sent for ${numRequested} events`,
+        `${topicName} - Subscribe request sent for ${numRequested} events`
       );
     } catch (error) {
       throw new Error(`Failed to subscribe to events for topic ${topicName}`, {
@@ -453,7 +464,7 @@ export default class PubSubApiClient {
     const subscription = this.#subscriptions.get(topicName);
     if (!subscription) {
       throw new Error(
-        `Failed to request additional events for topic ${topicName}, no active subscription found.`,
+        `Failed to request additional events for topic ${topicName}, no active subscription found.`
       );
     }
 
@@ -465,7 +476,7 @@ export default class PubSubApiClient {
       numRequested: numRequested,
     });
     this.#logger.debug(
-      `${topicName} - Resubscribing to a batch of ${numRequested} events`,
+      `${topicName} - Resubscribing to a batch of ${numRequested} events`
     );
   }
 
@@ -480,14 +491,13 @@ export default class PubSubApiClient {
   async publish(topicName, payload, correlationKey) {
     try {
       this.#logger.debug(
-        `${topicName} - Preparing to publish event: ${toJsonString(payload)}`,
+        `${topicName} - Preparing to publish event: ${toJsonString(payload)}`
       );
       if (!this.#client) {
-        throw new Error('Pub/Sub API client is not connected.');
+        throw new Error("Pub/Sub API client is not connected.");
       }
-      const schema = await this.#fetchEventSchemaFromTopicNameWithClient(
-        topicName,
-      );
+      const schema =
+        await this.#fetchEventSchemaFromTopicNameWithClient(topicName);
 
       const id = correlationKey ? correlationKey : crypto.randomUUID();
       const response = await new Promise((resolve, reject) => {
@@ -508,7 +518,7 @@ export default class PubSubApiClient {
             } else {
               resolve(response);
             }
-          },
+          }
         );
       });
       const result = response.results[0];
@@ -526,11 +536,11 @@ export default class PubSubApiClient {
    * @memberof PubSubApiClient.prototype
    */
   close() {
-    this.#logger.info('Clear subscriptions');
+    this.#logger.info("Clear subscriptions");
     this.#subscriptions.clear();
     this.#processingQueues.clear();
 
-    this.#logger.info('Closing gRPC stream');
+    this.#logger.info("Closing gRPC stream");
     this.#client?.close();
   }
 
@@ -541,7 +551,12 @@ export default class PubSubApiClient {
    * @param {SubscribeCallback} subscribeCallback Callback function
    * @param {boolean} isInfiniteEventRequest Whether this is an infinite event request
    */
-  async #processEventBatch(events, topicName, subscribeCallback, isInfiniteEventRequest) {
+  async #processEventBatch(
+    events,
+    topicName,
+    subscribeCallback,
+    isInfiniteEventRequest
+  ) {
     // Sort events by replay ID to ensure proper ordering
     const sortedEvents = [...events].sort((a, b) => {
       const replayIdA = decodeReplayId(a.replayId);
@@ -552,21 +567,17 @@ export default class PubSubApiClient {
     // Process events sequentially to maintain order
     for (const event of sortedEvents) {
       try {
-        this.#logger.debug(
-          `${topicName} - Raw event: ${toJsonString(event)}`,
-        );
+        this.#logger.debug(`${topicName} - Raw event: ${toJsonString(event)}`);
         // Load event schema from cache or from the gRPC client
         this.#logger.debug(
-          `${topicName} - Retrieving schema ID: ${event.event.schemaId}`,
+          `${topicName} - Retrieving schema ID: ${event.event.schemaId}`
         );
-        const schema = await this.#getEventSchemaFromId(
-          event.event.schemaId,
-        );
+        const schema = await this.#getEventSchemaFromId(event.event.schemaId);
         // Retrieve subscription
         const subscription = this.#subscriptions.get(topicName);
         if (!subscription) {
           throw new Error(
-            `Failed to retrieve subscription for topic ${topicName}.`,
+            `Failed to retrieve subscription for topic ${topicName}.`
           );
         }
         subscription.info.receivedEventCount++;
@@ -574,18 +585,18 @@ export default class PubSubApiClient {
         const parsedEvent = parseEvent(schema, event, topicName);
 
         this.#logger.debug(
-          `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`,
+          `${topicName} - Parsed event: ${toJsonString(parsedEvent)}`
         );
 
         // Call the callback and wait if it returns a Promise to ensure order
         const callbackResult = subscribeCallback(
           subscription.info,
           SubscribeCallbackType.EVENT,
-          parsedEvent,
+          parsedEvent
         );
 
         // If the callback returns a Promise, wait for it to complete
-        if (callbackResult && typeof callbackResult.then === 'function') {
+        if (callbackResult && typeof callbackResult.then === "function") {
           await callbackResult;
         }
       } catch (error) {
@@ -595,7 +606,10 @@ export default class PubSubApiClient {
           replayId = decodeReplayId(event.replayId);
           // eslint-disable-next-line no-empty, no-unused-vars
         } catch (error) {}
-        const latestReplayId = decodeReplayId(this.#subscriptions.get(topicName)?.info?.lastReplayId || Buffer.alloc(8));
+        const latestReplayId = decodeReplayId(
+          this.#subscriptions.get(topicName)?.info?.lastReplayId ||
+            Buffer.alloc(8)
+        );
         const message = replayId
           ? `Failed to parse event with replay ID ${replayId}`
           : `Failed to parse event with unknown replay ID (latest replay ID was ${latestReplayId})`;
@@ -604,34 +618,37 @@ export default class PubSubApiClient {
           error,
           replayId,
           event,
-          latestReplayId,
+          latestReplayId
         );
         subscribeCallback(
           this.#subscriptions.get(topicName)?.info,
           SubscribeCallbackType.ERROR,
-          parseError,
+          parseError
         );
         this.#logger.error(parseError);
       }
 
       // Handle last requested event
       const subscription = this.#subscriptions.get(topicName);
-      if (subscription &&
-          subscription.info.receivedEventCount === subscription.info.requestedEventCount) {
+      if (
+        subscription &&
+        subscription.info.receivedEventCount ===
+          subscription.info.requestedEventCount
+      ) {
         this.#logger.debug(
-          `${topicName} - Reached last of ${subscription.info.requestedEventCount} requested event on channel.`,
+          `${topicName} - Reached last of ${subscription.info.requestedEventCount} requested event on channel.`
         );
         if (isInfiniteEventRequest) {
           // Request additional events
           this.requestAdditionalEvents(
             subscription.info.topicName,
-            subscription.info.requestedEventCount,
+            subscription.info.requestedEventCount
           );
         } else {
           // Emit a 'lastevent' event when reaching the last requested event count
           subscribeCallback(
             subscription.info,
-            SubscribeCallbackType.LAST_EVENT,
+            SubscribeCallbackType.LAST_EVENT
           );
         }
       }
@@ -674,7 +691,7 @@ export default class PubSubApiClient {
           // Get the schema information
           const { schemaId } = response;
           this.#logger.debug(
-            `${topicName} - Retrieving schema ID: ${schemaId}`,
+            `${topicName} - Retrieving schema ID: ${schemaId}`
           );
           // Check cache for schema thanks to ID
           let schema = this.#schemaChache.getFromId(schemaId);

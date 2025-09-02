@@ -99,6 +99,7 @@ export type Configuration = {
     accessToken?: string;
     instanceUrl?: string;
     organizationId?: string;
+    rejectUnauthorizedSsl?: boolean;
 };
 export type Logger = {
     debug: Function;
@@ -112,7 +113,7 @@ export type SubscribeRequest = {
     replayPreset?: number;
     replayId?: number;
 };
-import { connectivityState } from '@grpc/grpc-js';
+import { connectivityState } from "@grpc/grpc-js";
 /**
  * Enum for subscripe callback type values
  */
@@ -125,6 +126,6 @@ declare namespace SubscribeCallbackType {
     let GRPC_STATUS: string;
     let GRPC_KEEP_ALIVE: string;
 }
-import { AuthType } from './utils/configuration.js';
+import { AuthType } from "./utils/configuration.js";
 export {};
 //# sourceMappingURL=client.d.ts.map
